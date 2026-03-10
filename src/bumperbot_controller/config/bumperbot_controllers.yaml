@@ -9,9 +9,14 @@ controller_manager:
     simple_velocity_controller:
       type: velocity_controllers/JointGroupVelocityController
 
+    bumperbot_controller:
+     type: diff_drive_controller/DiffDriveController
+
 
 simple_velocity_controller:
   ros__parameters:
     joints:
       - wheel_left_joint
       - wheel_right_joint
+
+bumperbot_controller:
