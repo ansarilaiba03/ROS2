@@ -3,8 +3,10 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseArray, Pose
-from tf_transformations import euler_from_quaternion
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
 from math import sin, cos, atan2, sqrt, fabs, pi
+import random
+import time
 
 
 def normalize(z):
@@ -79,7 +81,35 @@ class OdometryMotionModel(Node):
         else:
             delta_rot1 = angle_diff(atan2(odom_y_increment, odom_x_increment), yaw)
         delta_trasl = sqrt(pow(odom_y_increment, 2) + pow(odom_x_increment, 2))
-        delta_rot2 = angle_diff(odom_theta_increment, delta_rot1)       
+        delta_rot2 = angle_diff(odom_theta_increment, delta_rot1)   
+
+        rot1_variance = self.alpha1 * delta_rot1 + self.alpha2 * delta_trasl
+        trasl_variance = self.alpha3 * delta_trasl + self.alpha4 * delta_rot2
+        rot2_variance = self.alpha1 * delta_rot2 + self.alpha2 * delta_trasl
+
+        random.seed(int(time.time()))
+        for sample in self.samples.poses:
+            rot1_noise = random.gauss(0.0, rot1_variance)
+            rot2_noise = random.gauss(0.0, rot2_variance)
+            trasl_noise = random.gauss(0.0, trasl_variance)
+
+            delta_rot1_draw = angle_diff(delta_rot1, rot1_noise)
+            delta_trans_draw = delta_trasl - trasl_noise
+            delta_rot2_draw = angle_diff(delta_rot2, rot2_noise)
+
+            sample_q = [sample.orientation.x, sample.orientation.y, sample.orientation.z, sample.orientation.w]
+            sample_roll, sample_pitch, sample_yaw = euler_from_quaternion(sample_q)
+            sample.position.x += delta_trans_draw * cos(sample_yaw + delta_rot1_draw)
+            sample.position.y += delta_trans_draw * sin(sample_yaw + delta_rot1_draw)
+            q = quaternion_from_euler(0.0, 0.0, sample_yaw + delta_rot1_draw + delta_rot2_draw)
+            sample.orientation.x, sample.orientation.y, sample.orientation.z, sample.orientation.w = q
+
+        self.last_odom_x = odom.pose.pose.position.x
+        self.last_odom_y = odom.pose.pose.position.y
+        self.last_odom_theta = yaw
+        self.pose_array_pub_.publish(self.samples)
+
+
 
 def main():
     rclpy.init()
