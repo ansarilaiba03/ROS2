@@ -12,11 +12,11 @@ find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
-ament_python_install_package($(PROJECT_NAME))
+ament_python_install_package(${PROJECT_NAME})
 
 install(PROGRAMS
-  $(PROJECT_NAME)/mapping_with_known_poses.py
-  DESTINATION lib/$(PROJECT_NAME)
+  ${PROJECT_NAME}/mapping_with_known_poses.py
+  DESTINATION lib/${PROJECT_NAME}
 
 )
 
