@@ -2,46 +2,38 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import Twist, PoseStamped, Pose
 from nav_msgs.msg import Path
 from tf2_ros import Buffer, TransformListener
 import math
 from tf_transformations import quaternion_matrix, quaternion_from_matrix, translation_from_matrix, inverse_matrix, concatenate_matrices
 
 
-class PDMotionPlanner(Node):
+class PurePursuit(Node):
     def __init__(self):
-        super().__init__("pd_motion_planner_node")
+        super().__init__("pure_pursuit_motion_planner_node")
 
         # TF buffer and listener
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # Parameters
-        self.declare_parameter("kp", 2.0)
-        self.declare_parameter("kd", 0.1)
-        self.declare_parameter("step_size", 0.2)
+        self.declare_parameter("look_ahead_distance", 0.5)
         self.declare_parameter("max_linear_velocity", 0.3)
         self.declare_parameter("max_angular_velocity", 1.0)
 
-        self.kp = self.get_parameter("kp").value
-        self.kd = self.get_parameter("kd").value
-        self.step_size = self.get_parameter("step_size").value
+        self.look_ahead_distance = self.get_parameter("look_ahead_distance").value
         self.max_linear_velocity = self.get_parameter("max_linear_velocity").value
         self.max_angular_velocity = self.get_parameter("max_angular_velocity").value
 
         # Subscribers and publishers
         self.path_sub = self.create_subscription(Path, "/a_star/path", self.path_callback, 10)
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        self.next_pose_pub = self.create_publisher(PoseStamped, "/pd/next_pose", 10)
+        self.carrot_pose_pub = self.create_publisher(PoseStamped, "/pure_pursuit/carrot", 10)
 
         # Control loop
         self.timer = self.create_timer(0.1, self.control_loop)
         self.global_plan = None
-
-        self.prev_angular_error = 0.0
-        self.prev_linear_error = 0.0
-        self.last_cycle_time = self.get_clock().now()
 
     def path_callback(self, path: Path):
         self.global_plan = path
@@ -69,9 +61,9 @@ class PDMotionPlanner(Node):
         robot_pose.pose.position.y = robot_pose_transform.transform.translation.y
         robot_pose.pose.orientation = robot_pose_transform.transform.rotation
 
-        next_pose: PoseStamped = self.get_next_pose(robot_pose)
-        dx = next_pose.pose.position.x - robot_pose.pose.position.x
-        dy = next_pose.pose.position.y - robot_pose.pose.position.y
+        carrot_pose: PoseStamped = self.get_carrot_pose(robot_pose)
+        dx = carrot_pose.pose.position.x - robot_pose.pose.position.x
+        dy = carrot_pose.pose.position.y - robot_pose.pose.position.y
         distance = math.sqrt(dx ** 2 + dy ** 2)
 
         if distance <= 0.1:
@@ -79,10 +71,9 @@ class PDMotionPlanner(Node):
             self.global_plan.poses.clear()
             return
 
-        self.next_pose_pub.publish(next_pose)
+        self.carrot_pose_pub.publish(carrot_pose)
 
-        # Calculate the PDMotionPlanner command
-        # Transform robot pose and next pose into matrices
+        # Calculate the curvature to the look-ahead point
         robot_tf = quaternion_matrix([
             robot_pose.pose.orientation.x,
             robot_pose.pose.orientation.y,
@@ -92,53 +83,52 @@ class PDMotionPlanner(Node):
         robot_tf[0][3] = robot_pose.pose.position.x
         robot_tf[1][3] = robot_pose.pose.position.y
 
-        next_pose_tf = quaternion_matrix([
-            next_pose.pose.orientation.x,
-            next_pose.pose.orientation.y,
-            next_pose.pose.orientation.z,
-            next_pose.pose.orientation.w,
+        carrot_pose_tf = quaternion_matrix([
+            carrot_pose.pose.orientation.x,
+            carrot_pose.pose.orientation.y,
+            carrot_pose.pose.orientation.z,
+            carrot_pose.pose.orientation.w,
         ])
-        next_pose_tf[0][3] = next_pose.pose.position.x
-        next_pose_tf[1][3] = next_pose.pose.position.y
+        carrot_pose_tf[0][3] = carrot_pose.pose.position.x
+        carrot_pose_tf[1][3] = carrot_pose.pose.position.y
 
-        # Compute relative transform: next_pose_robot_tf = robot_tf.inverse() * next_pose_tf
-        next_pose_robot_tf = concatenate_matrices(inverse_matrix(robot_tf), next_pose_tf)
+        carrot_pose_robot_tf = concatenate_matrices(inverse_matrix(robot_tf), carrot_pose_tf)
+        carrot_pose_robot = PoseStamped()
+        carrot_pose_robot.pose.position.x = carrot_pose_robot_tf[0][3]
+        carrot_pose_robot.pose.position.y = carrot_pose_robot_tf[1][3]
+        carrot_pose_robot.pose.position.z = carrot_pose_robot_tf[2][3]
+        quaternion = quaternion_from_matrix(carrot_pose_robot_tf)
+        carrot_pose_robot.pose.orientation.x = quaternion[0]
+        carrot_pose_robot.pose.orientation.y = quaternion[1]
+        carrot_pose_robot.pose.orientation.z = quaternion[2]
+        carrot_pose_robot.pose.orientation.w = quaternion[3]
 
-        # Extract relative position and orientation
-        angular_error = next_pose_robot_tf[1, 3]
-        linear_error = next_pose_robot_tf[0, 3] 
+        curvature = self.get_curvature(carrot_pose_robot.pose)
 
-        dt = (self.get_clock().now() - self.last_cycle_time).nanoseconds * 1e-9
-
-        angular_error_derivative = (angular_error - self.prev_angular_error) / dt
-        linear_error_derivative = (linear_error - self.prev_linear_error) / dt
-
+        #  Create and publish the velocity command
         cmd_vel = Twist()
-        cmd_vel.angular.z = max(
-            -self.max_angular_velocity,
-            min(self.kp * angular_error + self.kd * angular_error_derivative, self.max_angular_velocity)
-        )
-        cmd_vel.linear.x = max(
-            -self.max_linear_velocity,
-            min(self.kp * linear_error + self.kd * linear_error_derivative, self.max_linear_velocity)
-        )
-
+        cmd_vel.linear.x = self.max_linear_velocity
+        cmd_vel.angular.z = curvature * self.max_angular_velocity
         self.cmd_pub.publish(cmd_vel)
-        self.prev_angular_error = angular_error
-        self.prev_linear_error = linear_error
-        self.last_cycle_time = self.get_clock().now()
 
-    def get_next_pose(self, robot_pose: PoseStamped) -> PoseStamped:
-        next_pose = self.global_plan.poses[-1]
+    def get_carrot_pose(self, robot_pose: PoseStamped) -> PoseStamped:
+        carrot_pose = self.global_plan.poses[-1]
         for pose in reversed(self.global_plan.poses):
             dx = pose.pose.position.x - robot_pose.pose.position.x
             dy = pose.pose.position.y - robot_pose.pose.position.y
             distance = math.sqrt(dx * dx + dy * dy)
-            if distance > self.step_size:
-                next_pose = pose
+            if distance > self.look_ahead_distance:
+                carrot_pose = pose
             else:
                 break
-        return next_pose
+        return carrot_pose
+    
+    def get_curvature(self, carrot_pose: Pose):
+        carrot_dist = carrot_pose.position.x ** 2 + carrot_pose.position.y ** 2
+        if carrot_dist > 0.001:
+            return 2.0 * carrot_pose.position.y / carrot_dist
+        else:
+            return 0.0
 
     def transform_plan(self, frame):
         if self.global_plan.header.frame_id == frame:
@@ -181,7 +171,7 @@ class PDMotionPlanner(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    pd_motion_planner = PDMotionPlanner()
+    pd_motion_planner = PurePursuit()
     rclpy.spin(pd_motion_planner)
     pd_motion_planner.destroy_node()
     rclpy.shutdown()
